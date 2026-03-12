@@ -1,1 +1,529 @@
 # Projet-LSDMP400
+
+
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Simulation électrostatique par éléments finis (implémentation directe)
+========================================================================
+Calcule la distribution de potentiel électrique et le champ électrique
+dans un isolant soumis à une différence de potentiel entre deux électrodes.
+
+Méthode: Éléments finis avec éléments triangulaires 2D
+Équation de Laplace: ∇·(ε ∇φ) = 0
+Champ électrique: E = -∇φ
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.sparse import lil_matrix, csr_matrix
+from scipy.sparse.linalg import spsolve
+from matplotlib.tri import Triangulation
+import matplotlib.patches as patches
+
+
+class ElectrostaticFEM:
+    """
+    Classe pour la simulation électrostatique par éléments finis
+    """
+    
+    def __init__(self, length=1.0, height=0.5, nx=30, ny=15, epsilon_r=4.0):
+        """
+        Initialisation du problème
+        
+        Parameters:
+        -----------
+        length : float
+            Longueur du domaine (m)
+        height : float
+            Hauteur du domaine (m)
+        nx, ny : int
+            Nombre de nœuds dans chaque direction
+        epsilon_r : float
+            Permittivité relative de l'isolant
+        """
+        self.length = length
+        self.height = height
+        self.nx = nx
+        self.ny = ny
+        self.epsilon_r = epsilon_r
+        self.epsilon_0 = 8.854187817e-12  # F/m
+        
+        # Génération du maillage
+        self.generate_mesh()
+        
+    def generate_mesh(self):
+        """
+        Génère un maillage triangulaire structuré
+        """
+        # Grille de nœuds
+        x = np.linspace(0, self.length, self.nx)
+        y = np.linspace(0, self.height, self.ny)
+        X, Y = np.meshgrid(x, y)
+        
+        # Coordonnées des nœuds (flatten)
+        self.nodes = np.column_stack([X.ravel(), Y.ravel()])
+        self.n_nodes = len(self.nodes)
+        
+        # Génération des triangles (2 triangles par rectangle)
+        triangles = []
+        for j in range(self.ny - 1):
+            for i in range(self.nx - 1):
+                # Indices des 4 coins du rectangle
+                n0 = j * self.nx + i
+                n1 = j * self.nx + (i + 1)
+                n2 = (j + 1) * self.nx + (i + 1)
+                n3 = (j + 1) * self.nx + i
+                
+                # Triangle 1: n0-n1-n3
+                triangles.append([n0, n1, n3])
+                # Triangle 2: n1-n2-n3
+                triangles.append([n1, n2, n3])
+        
+        self.elements = np.array(triangles)
+        self.n_elements = len(self.elements)
+        
+        # Identification des nœuds frontières
+        self.left_nodes = np.where(np.abs(self.nodes[:, 0]) < 1e-10)[0]
+        self.right_nodes = np.where(np.abs(self.nodes[:, 0] - self.length) < 1e-10)[0]
+        self.bottom_nodes = np.where(np.abs(self.nodes[:, 1]) < 1e-10)[0]          # MODIF
+        self.top_nodes = np.where(np.abs(self.nodes[:, 1] - self.height) < 1e-10)[0] # MODIF
+        
+        print(f"Maillage généré: {self.n_nodes} nœuds, {self.n_elements} éléments")
+        
+    def local_stiffness_matrix(self, elem_nodes):
+        """
+        Calcule la matrice de rigidité locale pour un élément triangulaire
+        
+        Parameters:
+        -----------
+        elem_nodes : array (3, 2)
+            Coordonnées des 3 nœuds du triangle
+            
+        Returns:
+        --------
+        K_local : array (3, 3)
+            Matrice de rigidité locale
+        """
+        # Coordonnées des nœuds
+        x1, y1 = elem_nodes[0]
+        x2, y2 = elem_nodes[1]
+        x3, y3 = elem_nodes[2]
+        
+        # Aire du triangle (formule du déterminant)
+        area = 0.5 * abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1))
+        
+        if area < 1e-15:
+            return np.zeros((3, 3))
+        
+        # Dérivées des fonctions de forme
+        b = np.array([y2 - y3, y3 - y1, y1 - y2])
+        c = np.array([x3 - x2, x1 - x3, x2 - x1])
+        
+        # Matrice de rigidité locale: K_ij = (ε/4A) * (b_i*b_j + c_i*c_j)
+        K_local = np.zeros((3, 3))
+        epsilon = self.epsilon_0 * self.epsilon_r
+        
+        for i in range(3):
+            for j in range(3):
+                K_local[i, j] = (epsilon / (4 * area)) * (b[i] * b[j] + c[i] * c[j])
+        
+        return K_local
+    
+    def assemble_global_matrix(self):
+        """
+        Assemble la matrice globale de rigidité
+        
+        Returns:
+        --------
+        K : sparse matrix (n_nodes, n_nodes)
+            Matrice de rigidité globale
+        """
+        K = lil_matrix((self.n_nodes, self.n_nodes))
+        
+        # Boucle sur tous les éléments
+        for elem_idx, elem in enumerate(self.elements):
+            # Coordonnées des nœuds de l'élément
+            elem_nodes = self.nodes[elem]
+            
+            # Matrice de rigidité locale
+            K_local = self.local_stiffness_matrix(elem_nodes)
+            
+            # Assemblage dans la matrice globale
+            for i in range(3):
+                for j in range(3):
+                    K[elem[i], elem[j]] += K_local[i, j]
+        
+        return K.tocsr()
+    
+    def apply_boundary_conditions(self, K, F, V_left=100.0, V_right=0.0,V_bottom=0.0,V_top=0.0):
+        """
+        Applique les conditions aux limites de Dirichlet
+        
+        Parameters:
+        -----------
+        K : sparse matrix
+            Matrice de rigidité
+        F : array
+            Vecteur force (second membre)
+        V_left : float
+            Potentiel à l'électrode gauche
+        V_right : float
+            Potentiel à l'électrode droite
+            
+        Returns:
+        --------
+        K_mod, F_mod : modified system
+        bc_nodes : dict
+            Nœuds avec conditions aux limites
+        """
+        K_mod = K.tolil()
+        F_mod = F.copy()
+        
+        bc_nodes = {}
+        
+        # Électrode gauche (x = 0)
+        for node in self.left_nodes:
+            bc_nodes[node] = V_left
+            K_mod[node, :] = 0
+            K_mod[node, node] = 1
+            F_mod[node] = V_left
+        
+        for node in self.right_nodes:
+            bc_nodes[node] = V_right
+            K_mod[node, :] = 0
+            K_mod[node, node] = 1
+            F_mod[node] = V_right
+
+        for node in self.bottom_nodes:                   
+            bc_nodes[node] = V_bottom                    
+            K_mod[node, :] = 0                           
+            K_mod[node, node] = 1                        
+            F_mod[node] = V_bottom                       
+
+        for node in self.top_nodes:                   
+            bc_nodes[node] = V_top                       
+            K_mod[node, :] = 0                           
+            K_mod[node, node] = 1                        
+            F_mod[node] = V_top                        
+                
+        return K_mod.tocsr(), F_mod, bc_nodes
+    
+    def solve(self, V_left=100.0, V_right=0.0,V_bottom=0.0,V_top=0.0):
+        """
+        Résout le système d'équations
+        
+        Parameters:
+        -----------
+        V_left, V_right : float
+            Potentiels aux électrodes
+            
+        Returns:
+        --------
+        phi : array
+            Potentiel électrique à chaque nœud
+        """
+        print("\nAssemblage de la matrice de rigidité globale...")
+        K = self.assemble_global_matrix()
+        
+        # Vecteur force (nul pour l'équation de Laplace homogène)
+        F = np.zeros(self.n_nodes)
+        
+        print("Application des conditions aux limites...")
+        K_mod, F_mod, bc_nodes = self.apply_boundary_conditions(K, F, V_left, V_right,V_bottom,V_top)
+        
+        print("Résolution du système linéaire...")
+        self.phi = spsolve(K_mod, F_mod)
+        
+        print(f"Solution obtenue: min(φ) = {self.phi.min():.2f} V, "
+              f"max(φ) = {self.phi.max():.2f} V")
+        
+        return self.phi
+    
+    def compute_electric_field(self):
+        """
+        Calcule le champ électrique E = -∇φ à partir de la solution
+        
+        Returns:
+        --------
+        E : array (n_elements, 2)
+            Champ électrique pour chaque élément
+        """
+        E = np.zeros((self.n_elements, 2))
+        
+        for elem_idx, elem in enumerate(self.elements):
+            # Coordonnées et potentiels des nœuds
+            x1, y1 = self.nodes[elem[0]]
+            x2, y2 = self.nodes[elem[1]]
+            x3, y3 = self.nodes[elem[2]]
+            
+            phi1 = self.phi[elem[0]]
+            phi2 = self.phi[elem[1]]
+            phi3 = self.phi[elem[2]]
+            
+            # Aire du triangle
+            area = 0.5 * abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1))
+            
+            if area < 1e-15:
+                continue
+            
+            # Dérivées des fonctions de forme
+            b = np.array([y2 - y3, y3 - y1, y1 - y2])
+            c = np.array([x3 - x2, x1 - x3, x2 - x1])
+            
+            # Gradient du potentiel
+            dphi_dx = (b[0] * phi1 + b[1] * phi2 + b[2] * phi3) / (2 * area)
+            dphi_dy = (c[0] * phi1 + c[1] * phi2 + c[2] * phi3) / (2 * area)
+            
+            # Champ électrique E = -∇φ
+            E[elem_idx, 0] = -dphi_dx
+            E[elem_idx, 1] = -dphi_dy
+        
+        self.E_field = E
+        print(f"Champ électrique calculé: max(|E|) = {np.linalg.norm(E, axis=1).max():.2f} V/m")
+        
+        return E
+    
+    def plot_results(self, V_left=100.0, V_right=0.0):
+        """
+        Visualise les résultats
+        """
+        # Créer la triangulation pour les graphiques
+        tri = Triangulation(self.nodes[:, 0], self.nodes[:, 1], self.elements)
+        
+        # Calculer la magnitude du champ électrique
+        E_magnitude = np.linalg.norm(self.E_field, axis=1)
+        
+        # Créer les figures
+        fig = plt.figure(figsize=(16, 10))
+        
+        # 1. Maillage
+        ax1 = fig.add_subplot(231)
+        ax1.triplot(tri, 'k-', linewidth=0.3, alpha=0.5)
+        ax1.plot(self.nodes[self.left_nodes, 0], self.nodes[self.left_nodes, 1], 
+                'ro', markersize=3, label='Électrode gauche')
+        ax1.plot(self.nodes[self.right_nodes, 0], self.nodes[self.right_nodes, 1], 
+                'bo', markersize=3, label='Électrode droite')
+        ax1.set_xlabel('x (m)')
+        ax1.set_ylabel('y (m)')
+        ax1.set_title('Maillage triangulaire')
+        ax1.legend()
+        ax1.set_aspect('equal')
+        ax1.grid(True, alpha=0.3)
+        
+        # 2. Distribution du potentiel (contours remplis)
+        ax2 = fig.add_subplot(232)
+        levels = np.linspace(self.phi.min(), self.phi.max(), 21)
+        contourf = ax2.tricontourf(tri, self.phi, levels=levels, cmap='RdYlBu_r')
+        plt.colorbar(contourf, ax=ax2, label='Potentiel φ (V)')
+        ax2.set_xlabel('x (m)')
+        ax2.set_ylabel('y (m)')
+        ax2.set_title('Distribution du potentiel électrique')
+        ax2.set_aspect('equal')
+        
+        # Ajouter les électrodes
+        electrode_left = patches.Rectangle((0, 0), 0.01, self.height, 
+                                          linewidth=2, edgecolor='red', 
+                                          facecolor='red', alpha=0.5)
+        electrode_right = patches.Rectangle((self.length-0.01, 0), 0.01, self.height, 
+                                           linewidth=2, edgecolor='blue', 
+                                           facecolor='blue', alpha=0.5)
+        ax2.add_patch(electrode_left)
+        ax2.add_patch(electrode_right)
+        
+        # 3. Lignes équipotentielles
+        ax3 = fig.add_subplot(233)
+        contour = ax3.tricontourf(tri, self.phi, levels=levels, cmap='RdYlBu_r', alpha=0.6)
+        ax3.tricontour(tri, self.phi, levels=15, colors='black', linewidths=1, alpha=0.8)
+        plt.colorbar(contour, ax=ax3, label='Potentiel φ (V)')
+        ax3.set_xlabel('x (m)')
+        ax3.set_ylabel('y (m)')
+        ax3.set_title('Lignes équipotentielles')
+        ax3.set_aspect('equal')
+        
+        # 4. Magnitude du champ électrique
+        ax4 = fig.add_subplot(234)
+        # Interpoler le champ aux nœuds
+        E_nodes = np.zeros(self.n_nodes)
+        counts = np.zeros(self.n_nodes)
+        for elem_idx, elem in enumerate(self.elements):
+            for node in elem:
+                E_nodes[node] += E_magnitude[elem_idx]
+                counts[node] += 1
+        E_nodes /= np.maximum(counts, 1)
+        
+        tcf = ax4.tricontourf(tri, E_nodes, levels=20, cmap='hot')
+        plt.colorbar(tcf, ax=ax4, label='|E| (V/m)')
+        ax4.set_xlabel('x (m)')
+        ax4.set_ylabel('y (m)')
+        ax4.set_title('Magnitude du champ électrique')
+        ax4.set_aspect('equal')
+        
+        # 5. Vecteurs du champ électrique
+        ax5 = fig.add_subplot(235)
+        # Calculer les centres des éléments
+        elem_centers = np.zeros((self.n_elements, 2))
+        for i, elem in enumerate(self.elements):
+            elem_centers[i] = self.nodes[elem].mean(axis=0)
+        
+        # Sous-échantillonner pour la visualisation
+        skip = max(1, self.n_elements // 400)
+        ax5.quiver(elem_centers[::skip, 0], elem_centers[::skip, 1],
+                  self.E_field[::skip, 0], self.E_field[::skip, 1],
+                  E_magnitude[::skip], cmap='hot', alpha=0.8)
+        ax5.set_xlabel('x (m)')
+        ax5.set_ylabel('y (m)')
+        ax5.set_title('Vecteurs du champ électrique')
+        ax5.set_aspect('equal')
+        
+        # 6. Coupe 1D au centre
+        ax6 = fig.add_subplot(236)
+        # Sélectionner les nœuds proches de y = height/2
+        y_mid = self.height / 2
+        tol = self.height / (2 * self.ny)
+        mask = np.abs(self.nodes[:, 1] - y_mid) < tol
+        x_cut = self.nodes[mask, 0]
+        phi_cut = self.phi[mask]
+        
+        # Trier par x
+        sort_idx = np.argsort(x_cut)
+        ax6.plot(x_cut[sort_idx], phi_cut[sort_idx], 'b-o', linewidth=2, markersize=4)
+        ax6.set_xlabel('Position x (m)')
+        ax6.set_ylabel('Potentiel φ (V)')
+        ax6.set_title(f'Coupe du potentiel (y = {y_mid:.3f} m)')
+        ax6.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig('/mnt/user-data/outputs/fem_electrostatic_results.png', 
+                   dpi=150, bbox_inches='tight')
+        print("\nFigure sauvegardée: fem_electrostatic_results.png")
+        
+        # Figure supplémentaire: analyse détaillée
+        fig2, ((ax7, ax8), (ax9, ax10)) = plt.subplots(2, 2, figsize=(14, 10))
+        
+        # Coupe du champ électrique
+        E_cut = np.zeros(len(x_cut))
+        for i, x_val in enumerate(x_cut):
+            # Trouver l'élément contenant ce point
+            for elem_idx, elem in enumerate(self.elements):
+                elem_nodes = self.nodes[elem]
+                if (elem_nodes[:, 0].min() <= x_val <= elem_nodes[:, 0].max() and
+                    elem_nodes[:, 1].min() <= y_mid <= elem_nodes[:, 1].max()):
+                    E_cut[i] = E_magnitude[elem_idx]
+                    break
+        
+        ax7.plot(x_cut[sort_idx], E_cut[sort_idx], 'r-o', linewidth=2, markersize=4)
+        ax7.set_xlabel('Position x (m)')
+        ax7.set_ylabel('|E| (V/m)')
+        ax7.set_title('Champ électrique le long de y = milieu')
+        ax7.grid(True, alpha=0.3)
+        
+        # Histogramme du potentiel
+        ax8.hist(self.phi, bins=50, edgecolor='black', alpha=0.7)
+        ax8.set_xlabel('Potentiel φ (V)')
+        ax8.set_ylabel('Nombre de nœuds')
+        ax8.set_title('Distribution statistique du potentiel')
+        ax8.grid(True, alpha=0.3)
+        
+        # Histogramme du champ électrique
+        ax9.hist(E_magnitude, bins=50, edgecolor='black', alpha=0.7, color='red')
+        ax9.set_xlabel('|E| (V/m)')
+        ax9.set_ylabel('Nombre d\'éléments')
+        ax9.set_title('Distribution statistique du champ électrique')
+        ax9.grid(True, alpha=0.3)
+        
+        # Densité d'énergie électrique: u = (1/2) ε E²
+        energy_density = 0.5 * self.epsilon_0 * self.epsilon_r * E_magnitude**2
+        ax10.hist(energy_density, bins=50, edgecolor='black', alpha=0.7, color='green')
+        ax10.set_xlabel('Densité d\'énergie u (J/m³)')
+        ax10.set_ylabel('Nombre d\'éléments')
+        ax10.set_title('Distribution de la densité d\'énergie électrique')
+        ax10.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig('/mnt/user-data/outputs/fem_analysis.png', 
+                   dpi=150, bbox_inches='tight')
+        print("Figure sauvegardée: fem_analysis.png")
+        
+        plt.show()
+
+
+def main():
+    """
+    Fonction principale
+    """
+    print("=" * 80)
+    print("SIMULATION ÉLECTROSTATIQUE PAR ÉLÉMENTS FINIS")
+    print("=" * 80)
+    
+    # Paramètres de simulation
+    length = 1.0        # Longueur (m)
+    height = 0.5        # Hauteur (m)
+    nx = 40             # Nombre de nœuds en x
+    ny = 20             # Nombre de nœuds en y
+    epsilon_r = 4.0     # Permittivité relative
+    V_left = 100.0      # Potentiel électrode gauche (V)
+    V_right = 0.0       # Potentiel électrode droite (V)
+    V_bottom = 0.0   # MODIF
+    V_top = 50.0     # MODIF
+        
+    print(f"\nParamètres physiques:")
+    print(f"  - Dimensions du domaine: {length} m × {height} m")
+    print(f"  - Permittivité relative: εr = {epsilon_r}")
+    print(f"  - Potentiel électrode gauche: V_left = {V_left} V")
+    print(f"  - Potentiel électrode droite: V_right = {V_right} V")
+    print(f"  - Différence de potentiel: ΔV = {V_left - V_right} V")
+    
+    print(f"\nParamètres numériques:")
+    print(f"  - Résolution du maillage: {nx} × {ny} nœuds")
+    
+    # Créer le problème
+    print("\n1. Initialisation du problème FEM...")
+    fem = ElectrostaticFEM(length, height, nx, ny, epsilon_r)
+    
+    # Résoudre
+    print("\n2. Résolution du système d'équations...")
+    phi = fem.solve(V_left, V_right, V_bottom, V_top)
+    
+    # Calculer le champ électrique
+    print("\n3. Calcul du champ électrique...")
+    E = fem.compute_electric_field()
+    
+    # Statistiques
+    E_magnitude = np.linalg.norm(E, axis=1)
+    energy_density = 0.5 * fem.epsilon_0 * epsilon_r * E_magnitude**2
+    total_energy = energy_density.sum() * (length * height / len(E))
+    
+    print(f"\n4. Statistiques:")
+    print(f"  - Potentiel moyen: {phi.mean():.2f} V")
+    print(f"  - Champ électrique moyen: {E_magnitude.mean():.2f} V/m")
+    print(f"  - Champ électrique maximal: {E_magnitude.max():.2f} V/m")
+    print(f"  - Énergie électrostatique totale: {total_energy:.2e} J")
+    
+    # Sauvegarder les données
+    print("\n5. Sauvegarde des résultats numériques...")
+    np.savez('/mnt/user-data/outputs/fem_data.npz',
+             nodes=fem.nodes,
+             elements=fem.elements,
+             phi=phi,
+             E_field=E,
+             parameters={'length': length, 'height': height,
+                        'epsilon_r': epsilon_r, 'V_left': V_left, 'V_right': V_right})
+    print("   Données sauvegardées: fem_data.npz")
+    
+    # Visualiser
+    print("\n6. Génération des graphiques...")
+    fem.plot_results(V_left, V_right)
+    
+    print("\n" + "=" * 80)
+    print("SIMULATION TERMINÉE AVEC SUCCÈS!")
+    print("=" * 80)
+    
+    return fem
+
+
+if __name__ == '__main__':
+    fem = main()
+
+
+#12/03/2026
