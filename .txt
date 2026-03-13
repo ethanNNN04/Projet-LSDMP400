@@ -525,5 +525,28 @@ def main():
 if __name__ == '__main__':
     fem = main()
 
+###############################################
+
+def variation_potentiel_nodes_phi(nodes):
+    x = nodes[:,0]
+    return x * (x**2 - 2)
+
+
+
+def gradient_phi_nodes(nodes):
+    
+    x = nodes[:,0]
+    
+    dphi_dx = 3*x**2 - 2
+    dphi_dy = np.zeros_like(x)
+    return np.column_stack((dphi_dx, dphi_dy))
+
+def chemp_elec(nodes):
+    
+    grad = gradient_phi_nodes(nodes)
+    
+    return -grad
+
+
 
 #12/03/2026
