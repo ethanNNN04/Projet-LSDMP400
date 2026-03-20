@@ -549,4 +549,482 @@ def chemp_elec(nodes):
 
 
 
+
+
+CODE 1 ELECTRODE 
+
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Simulation électrostatique FEM - Électrode unique sur face supérieure
+======================================================================
+Calcule la distribution de potentiel électrique et le champ électrique
+dans un isolant avec une électrode placée sur la face supérieure.
+
+Basé sur : coplanar_electrodes_configurable.py
+Modification : une seule électrode, graphique "Potential distribution"
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.sparse import lil_matrix, csr_matrix
+from scipy.sparse.linalg import spsolve
+from matplotlib.tri import Triangulation
+import matplotlib.patches as patches
+
+
+# ==============================================================================
+#  PARAMÈTRES UTILISATEUR — Modifier uniquement cette section
+# ==============================================================================
+
+# --- Dimensions du domaine (en mètres) ---
+LENGTH = 1.0        # Longueur totale du domaine (axe x)
+HEIGHT = 0.5        # Hauteur totale du domaine (axe y)
+
+# --- Résolution du maillage ---
+NX = 60             # Nombre de nœuds selon x (plus grand = plus précis mais plus lent)
+NY = 40             # Nombre de nœuds selon y
+
+# --- Matériau ---
+EPSILON_R = 4.0     # Permittivité relative de l'isolant
+
+# ------------------------------------------------------------------------------
+#  ÉLECTRODE UNIQUE (face supérieure)
+# ------------------------------------------------------------------------------
+# Centre de l'électrode sur la face supérieure
+LX     = 0.5        # Position Lx du centre de l'électrode (m) — entre 0 et LENGTH
+# LY est fixé à HEIGHT (face supérieure) — ne pas modifier
+LY     = HEIGHT     # (lecture seule, face supérieure)
+
+HALF_W = 0.15       # Demi-largeur de l'électrode (m)
+                    # → l'électrode s'étend de (LX - HALF_W) à (LX + HALF_W)
+
+V_ELEC = 1.0        # Potentiel appliqué à l'électrode (V)
+
+# ------------------------------------------------------------------------------
+#  FACE INFÉRIEURE (référence)
+# ------------------------------------------------------------------------------
+V_BOTTOM = 0.0      # Potentiel de référence sur la face inférieure (V)
+
+# ------------------------------------------------------------------------------
+#  PROFILS V(x) et V(y)
+# ------------------------------------------------------------------------------
+# Profil V(x) : coupe horizontale à hauteur Y_CUT
+Y_CUT = 0.25        # Hauteur de la coupe horizontale (m) — entre 0 et HEIGHT
+                    # → affiche V(x) à y = Y_CUT
+
+# Profil V(y) : coupe verticale automatiquement au centre de l'électrode (x = Lx)
+
+# ==============================================================================
+#  FIN DE LA SECTION UTILISATEUR — Ne pas modifier ce qui suit
+# ==============================================================================
+
+
+def _validate_electrode(lx, half_w, length, label):
+    """Vérifie que l'électrode reste dans le domaine."""
+    x_start = lx - half_w
+    x_end   = lx + half_w
+    if x_start < 0:
+        raise ValueError(f"{label}: le bord gauche ({x_start:.3f} m) sort du domaine (x < 0).")
+    if x_end > length:
+        raise ValueError(f"{label}: le bord droit ({x_end:.3f} m) sort du domaine (x > {length} m).")
+    if half_w <= 0:
+        raise ValueError(f"{label}: la demi-largeur doit être strictement positive.")
+    return x_start, x_end
+
+
+class SingleElectrodeFEM:
+    """
+    FEM pour électrostatique avec une électrode unique sur la face supérieure.
+    L'électrode est définie par son centre (Lx) et sa demi-largeur.
+    """
+
+    def __init__(self, length, height, nx, ny, lx, half_w, epsilon_r):
+        """
+        Parameters:
+        -----------
+        length : float
+            Longueur du domaine (m)
+        height : float
+            Hauteur du domaine (m)
+        nx, ny : int
+            Nombre de nœuds dans chaque direction
+        lx : float
+            Centre x de l'électrode sur la face supérieure (m)
+        half_w : float
+            Demi-largeur de l'électrode (m)
+        epsilon_r : float
+            Permittivité relative de l'isolant
+        """
+        self.length    = length
+        self.height    = height
+        self.nx        = nx
+        self.ny        = ny
+        self.epsilon_r = epsilon_r
+        self.epsilon_0 = 8.854187817e-12  # F/m
+
+        # Centre de l'électrode (attributs publics)
+        self.Lx = lx
+        self.Ly = height   # face supérieure (lecture seule)
+
+        # Position des bords déduite du centre et de la demi-largeur
+        x_start, x_end = _validate_electrode(lx, half_w, length, "Électrode")
+        self.electrode_pos = (x_start, x_end)
+
+        print(f"Centre de l'électrode : Lx = {self.Lx:.4f} m, Ly = {self.Ly:.4f} m")
+
+        # Génération du maillage
+        self.generate_mesh()
+
+    def generate_mesh(self):
+        """
+        Génère un maillage triangulaire structuré
+        """
+        # Grille de nœuds
+        x = np.linspace(0, self.length, self.nx)
+        y = np.linspace(0, self.height, self.ny)
+        X, Y = np.meshgrid(x, y)
+
+        # Coordonnées des nœuds (flatten)
+        self.nodes   = np.column_stack([X.ravel(), Y.ravel()])
+        self.n_nodes = len(self.nodes)
+
+        # Génération des triangles (2 triangles par rectangle)
+        triangles = []
+        for j in range(self.ny - 1):
+            for i in range(self.nx - 1):
+                n0 = j * self.nx + i
+                n1 = j * self.nx + (i + 1)
+                n2 = (j + 1) * self.nx + (i + 1)
+                n3 = (j + 1) * self.nx + i
+                triangles.append([n0, n1, n3])
+                triangles.append([n1, n2, n3])
+
+        self.elements   = np.array(triangles)
+        self.n_elements = len(self.elements)
+
+        # Identification des nœuds sur la face supérieure (y = height)
+        top_nodes_mask    = np.abs(self.nodes[:, 1] - self.height) < 1e-10
+        top_nodes_indices = np.where(top_nodes_mask)[0]
+
+        # Électrode : nœuds sur la face supérieure entre electrode_pos[0] et electrode_pos[1]
+        x_start, x_end = self.electrode_pos
+        self.electrode_nodes = top_nodes_indices[
+            (self.nodes[top_nodes_indices, 0] >= x_start) &
+            (self.nodes[top_nodes_indices, 0] <= x_end)
+        ]
+
+        # Face inférieure (masse/référence)
+        self.bottom_nodes = np.where(np.abs(self.nodes[:, 1]) < 1e-10)[0]
+
+        print(f"Maillage généré : {self.n_nodes} nœuds, {self.n_elements} éléments")
+        print(f"Électrode : {len(self.electrode_nodes)} nœuds "
+              f"(x = {x_start:.3f} m à {x_end:.3f} m)")
+
+    def local_stiffness_matrix(self, elem_nodes):
+        """
+        Calcule la matrice de rigidité locale pour un élément triangulaire
+        """
+        x1, y1 = elem_nodes[0]
+        x2, y2 = elem_nodes[1]
+        x3, y3 = elem_nodes[2]
+
+        area = 0.5 * abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1))
+        if area < 1e-15:
+            return np.zeros((3, 3))
+
+        b = np.array([y2 - y3, y3 - y1, y1 - y2])
+        c = np.array([x3 - x2, x1 - x3, x2 - x1])
+
+        K_local = np.zeros((3, 3))
+        epsilon  = self.epsilon_0 * self.epsilon_r
+        for i in range(3):
+            for j in range(3):
+                K_local[i, j] = (epsilon / (4 * area)) * (b[i] * b[j] + c[i] * c[j])
+        return K_local
+
+    def assemble_global_matrix(self):
+        """
+        Assemble la matrice globale de rigidité
+        """
+        K = lil_matrix((self.n_nodes, self.n_nodes))
+        for elem_idx, elem in enumerate(self.elements):
+            elem_nodes = self.nodes[elem]
+            K_local    = self.local_stiffness_matrix(elem_nodes)
+            for i in range(3):
+                for j in range(3):
+                    K[elem[i], elem[j]] += K_local[i, j]
+        return K.tocsr()
+
+    def apply_boundary_conditions(self, K, F, V_elec, V_bottom):
+        """
+        Applique les conditions aux limites de Dirichlet
+
+        Parameters:
+        -----------
+        K : sparse matrix
+            Matrice de rigidité
+        F : array
+            Vecteur force (second membre)
+        V_elec : float
+            Potentiel à l'électrode
+        V_bottom : float
+            Potentiel à la face inférieure (référence/masse)
+        """
+        K_mod = K.tolil()
+        F_mod = F.copy()
+
+        # Électrode
+        for node in self.electrode_nodes:
+            K_mod[node, :] = 0
+            K_mod[node, node] = 1
+            F_mod[node] = V_elec
+
+        # Face inférieure (masse)
+        for node in self.bottom_nodes:
+            K_mod[node, :] = 0
+            K_mod[node, node] = 1
+            F_mod[node] = V_bottom
+
+        return K_mod.tocsr(), F_mod
+
+    def solve(self, V_elec=1.0, V_bottom=0.0):
+        """
+        Résout le système d'équations
+        """
+        print("\nAssemblage de la matrice de rigidité globale...")
+        K = self.assemble_global_matrix()
+
+        # Vecteur force (nul pour l'équation de Laplace homogène)
+        F = np.zeros(self.n_nodes)
+
+        print("Application des conditions aux limites...")
+        K_mod, F_mod = self.apply_boundary_conditions(K, F, V_elec, V_bottom)
+
+        print("Résolution du système linéaire...")
+        self.phi = spsolve(K_mod, F_mod)
+
+        print(f"Solution obtenue : min(φ) = {self.phi.min():.4f} V, "
+              f"max(φ) = {self.phi.max():.4f} V")
+        return self.phi
+
+    def compute_electric_field(self):
+        """
+        Calcule le champ électrique E = -∇φ
+        """
+        E = np.zeros((self.n_elements, 2))
+
+        for elem_idx, elem in enumerate(self.elements):
+            x1, y1 = self.nodes[elem[0]]
+            x2, y2 = self.nodes[elem[1]]
+            x3, y3 = self.nodes[elem[2]]
+
+            phi1 = self.phi[elem[0]]
+            phi2 = self.phi[elem[1]]
+            phi3 = self.phi[elem[2]]
+
+            area = 0.5 * abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1))
+            if area < 1e-15:
+                continue
+
+            b = np.array([y2 - y3, y3 - y1, y1 - y2])
+            c = np.array([x3 - x2, x1 - x3, x2 - x1])
+
+            dphi_dx = (b[0] * phi1 + b[1] * phi2 + b[2] * phi3) / (2 * area)
+            dphi_dy = (c[0] * phi1 + c[1] * phi2 + c[2] * phi3) / (2 * area)
+
+            E[elem_idx, 0] = -dphi_dx
+            E[elem_idx, 1] = -dphi_dy
+
+        self.E_field  = E
+        E_magnitude   = np.linalg.norm(E, axis=1)
+        print(f"Champ électrique calculé : max(|E|) = {E_magnitude.max():.2f} V/m")
+        return E
+
+    def plot_results(self, V_elec=1.0, V_bottom=0.0, y_cut=None):
+        """
+        Visualise la distribution de potentiel + profils V(x) et V(y).
+
+        Sous-graphiques :
+          1. Potential distribution (colormap + équipotentielles)
+          2. Profil V(x) à hauteur y = y_cut (coupe horizontale configurable)
+          3. Profil V(y) au centre de l'électrode (x = Lx, coupe verticale)
+
+        Parameters:
+        -----------
+        V_elec : float
+            Potentiel de l'électrode (V)
+        V_bottom : float
+            Potentiel de la face inférieure (V)
+        y_cut : float
+            Hauteur de la coupe horizontale pour V(x) (m).
+            Si None, utilise HEIGHT / 2.
+        """
+        if y_cut is None:
+            y_cut = self.height / 2.0
+
+        # Validation de y_cut
+        if not (0 <= y_cut <= self.height):
+            raise ValueError(f"Y_CUT={y_cut} m doit être entre 0 et {self.height} m.")
+
+        # Conversion m → mm pour l'affichage
+        nodes_mm   = self.nodes * 1000
+        tri_mm     = Triangulation(nodes_mm[:, 0], nodes_mm[:, 1], self.elements)
+        x_start_mm = self.electrode_pos[0] * 1000
+        x_end_mm   = self.electrode_pos[1] * 1000
+        H_mm       = self.height * 1000
+        L_mm       = self.length * 1000
+        y_cut_mm   = y_cut * 1000
+        Lx_mm      = self.Lx * 1000
+
+        # ── Mise en page : 1 grand subplot en haut, 2 en bas ──────────────────
+        fig = plt.figure(figsize=(14, 10))
+        ax1 = fig.add_subplot(2, 2, (1, 2))   # ligne 1, toute la largeur
+        ax2 = fig.add_subplot(2, 2, 3)         # bas gauche  → V(x)
+        ax3 = fig.add_subplot(2, 2, 4)         # bas droite  → V(y)
+
+        # ── 1. Potential distribution ──────────────────────────────────────────
+        levels = np.linspace(V_bottom, V_elec, 30)
+        cf = ax1.tricontourf(tri_mm, self.phi, levels=levels, cmap='viridis')
+        cbar = plt.colorbar(cf, ax=ax1)
+        cbar.set_label('Potentiel (V)', fontsize=11, rotation=270, labelpad=15)
+        cbar.set_ticks(np.round(np.linspace(V_bottom, V_elec, 7), 2))
+
+        # Lignes équipotentielles blanches
+        ax1.tricontour(tri_mm, self.phi, levels=15,
+                       colors='white', linewidths=0.9, alpha=0.7)
+
+        # Électrode rouge
+        elec_h_mm = H_mm * 0.03
+        ax1.add_patch(patches.Rectangle(
+            (x_start_mm, H_mm), x_end_mm - x_start_mm, elec_h_mm,
+            linewidth=0, facecolor='red', clip_on=False))
+        ax1.text((x_start_mm + x_end_mm) / 2, H_mm + elec_h_mm * 1.5,
+                 f'{V_elec} V', ha='center', va='bottom',
+                 fontsize=12, fontweight='bold', color='black')
+
+        # Traits de coupe sur la carte
+        ax1.axhline(y_cut_mm, color='orange', linewidth=1.5, linestyle='--',
+                    label=f'Coupe V(x)  y = {y_cut_mm:.1f} mm')
+        ax1.axvline(Lx_mm, color='cyan', linewidth=1.5, linestyle='--',
+                    label=f'Coupe V(y)  x = Lx = {Lx_mm:.1f} mm')
+
+        ax1.set_xlim(0, L_mm)
+        ax1.set_ylim(0, H_mm)
+        ax1.set_xlabel('x (mm)', fontsize=12)
+        ax1.set_ylabel('y (mm)', fontsize=12)
+        ax1.set_title('Potential distribution', fontsize=14, fontweight='bold')
+        ax1.set_aspect('equal')
+        ax1.legend(fontsize=10, loc='lower right')
+
+        # ── 2. Profil V(x) à y = y_cut ────────────────────────────────────────
+        tol_x = self.height / (4 * self.ny)
+        mask_x = np.abs(self.nodes[:, 1] - y_cut) < tol_x
+        x_vals = self.nodes[mask_x, 0] * 1000   # mm
+        v_vals = self.phi[mask_x]
+        idx_sort = np.argsort(x_vals)
+        x_vals, v_vals = x_vals[idx_sort], v_vals[idx_sort]
+
+        ax2.plot(x_vals, v_vals, 'b-o', linewidth=2, markersize=3)
+        ax2.axvspan(x_start_mm, x_end_mm, alpha=0.15, color='red',
+                    label='Électrode')
+        ax2.axvline(Lx_mm, color='red', linewidth=1, linestyle=':', alpha=0.7)
+        ax2.set_xlabel('x (mm)', fontsize=12)
+        ax2.set_ylabel('V (V)', fontsize=12)
+        ax2.set_title(f'Profil V(x)  —  y = {y_cut_mm:.1f} mm',
+                      fontsize=12, fontweight='bold')
+        ax2.set_xlim(0, L_mm)
+        ax2.set_ylim(V_bottom - 0.05 * abs(V_elec - V_bottom),
+                     V_elec  + 0.05 * abs(V_elec - V_bottom))
+        ax2.grid(True, alpha=0.3)
+        ax2.legend(fontsize=10)
+
+        # ── 3. Profil V(y) à x = Lx ───────────────────────────────────────────
+        tol_y = self.length / (4 * self.nx)
+        mask_y = np.abs(self.nodes[:, 0] - self.Lx) < tol_y
+        y_vals = self.nodes[mask_y, 1] * 1000   # mm
+        v_vals_y = self.phi[mask_y]
+        idx_sort = np.argsort(y_vals)
+        y_vals, v_vals_y = y_vals[idx_sort], v_vals_y[idx_sort]
+
+        ax3.plot(v_vals_y, y_vals, 'g-o', linewidth=2, markersize=3)
+        ax3.axhline(H_mm,    color='red',   linewidth=1, linestyle='--',
+                    alpha=0.7, label='Face supérieure (électrode)')
+        ax3.axhline(0,       color='black', linewidth=1, linestyle='--',
+                    alpha=0.7, label='Face inférieure (référence)')
+        ax3.axhline(y_cut_mm, color='orange', linewidth=1, linestyle=':',
+                    alpha=0.8, label=f'y = {y_cut_mm:.1f} mm (coupe V(x))')
+        ax3.set_xlabel('V (V)', fontsize=12)
+        ax3.set_ylabel('y (mm)', fontsize=12)
+        ax3.set_title(f'Profil V(y)  —  x = Lx = {Lx_mm:.1f} mm',
+                      fontsize=12, fontweight='bold')
+        ax3.set_ylim(0, H_mm)
+        ax3.set_xlim(V_bottom - 0.05 * abs(V_elec - V_bottom),
+                     V_elec  + 0.05 * abs(V_elec - V_bottom))
+        ax3.grid(True, alpha=0.3)
+        ax3.legend(fontsize=9)
+
+        plt.tight_layout()
+        out = '/Users/ethan/PH461/projet/claude/requete2/potential_distribution.png'
+        plt.savefig(out, dpi=150, bbox_inches='tight')
+        print(f"\nFigure sauvegardée : {out}")
+        plt.show()
+
+
+# ==============================================================================
+#  POINT D'ENTRÉE
+# ==============================================================================
+def main():
+    print("=" * 70)
+    print("SIMULATION FEM — ÉLECTRODE UNIQUE — POTENTIAL DISTRIBUTION")
+    print("=" * 70)
+
+    print(f"\nConfiguration :")
+    print(f"  - Dimensions     : {LENGTH} m × {HEIGHT} m")
+    print(f"  - Résolution     : {NX} × {NY} nœuds")
+    print(f"  - Permittivité   : εr = {EPSILON_R}")
+    print(f"  - Électrode      : centre Lx={LX} m, Ly={LY} m (face sup.)")
+    print(f"                     bords [{LX - HALF_W:.3f}, {LX + HALF_W:.3f}] m, V={V_ELEC} V")
+    print(f"  - Face inférieure: V={V_BOTTOM} V (référence)")
+
+    # 1. Initialisation
+    print("\n1. Initialisation...")
+    fem = SingleElectrodeFEM(LENGTH, HEIGHT, NX, NY, LX, HALF_W, EPSILON_R)
+
+    # 2. Résolution
+    print("\n2. Résolution...")
+    phi = fem.solve(V_ELEC, V_BOTTOM)
+
+    # 3. Champ électrique
+    print("\n3. Calcul du champ électrique...")
+    E = fem.compute_electric_field()
+
+    # 4. Sauvegarde des données
+    print("\n4. Sauvegarde des données...")
+    np.savez('/Users/ethan/PH461/projet/claude/requete2/single_electrode_data.npz',
+             nodes=fem.nodes,
+             elements=fem.elements,
+             phi=phi,
+             E_field=E,
+             electrode_nodes=fem.electrode_nodes,
+             parameters={'length': LENGTH, 'height': HEIGHT,
+                         'Lx': LX, 'Ly': LY, 'half_w': HALF_W,
+                         'epsilon_r': EPSILON_R,
+                         'V_elec': V_ELEC, 'V_bottom': V_BOTTOM})
+    print("   Données sauvegardées : single_electrode_data.npz")
+
+    # 5. Graphique
+    print("\n5. Génération du graphique...")
+    fem.plot_results(V_ELEC, V_BOTTOM, y_cut=Y_CUT)
+
+    print("\n" + "=" * 70)
+    print("SIMULATION TERMINÉE!")
+    print("=" * 70)
+
+    return fem
+
+
+if __name__ == '__main__':
+    fem = main()
+
 #12/03/2026
