@@ -1,0 +1,512 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Simulation électrostatique FEM - Électrodes coplanaires sur face supérieure
+============================================================================
+Calcule la distribution de potentiel électrique et le champ électrique
+dans un isolant avec deux électrodes placées sur la face supérieure.
+
+Configuration: Électrodes coplanaires (géométrie de capteur capacitif)
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.sparse import lil_matrix, csr_matrix
+from scipy.sparse.linalg import spsolve
+from matplotlib.tri import Triangulation
+import matplotlib.patches as patches
+
+
+class CoplanarElectrodesFEM:
+    """
+    FEM pour électrostatique avec électrodes coplanaires sur la face supérieure
+    """
+    
+    def __init__(self,use_electrode2=False,length=1.0, height=0.5, nx=40, ny=20, 
+                 electrode1_pos=(0.2, 0.4), electrode2_pos=None,
+                 epsilon_r=4.0):
+        """
+        Initialisation du problème
+        
+        Parameters:
+        -----------
+        length : float
+            Longueur du domaine (m)
+        height : float
+            Hauteur du domaine (m)
+        nx, ny : int
+            Nombre de nœuds dans chaque direction
+        electrode1_pos : tuple (x_start, x_end)
+            Position de l'électrode 1 sur la face supérieure
+        electrode2_pos : tuple (x_start, x_end)
+            Position de l'électrode 2 sur la face supérieure
+        epsilon_r : float
+            Permittivité relative de l'isolant
+        """
+        self.use_electrode2 = use_electrode2
+        self.length = length
+        self.height = height
+        self.nx = nx
+        self.ny = ny
+        self.electrode1_pos = electrode1_pos
+        self.electrode2_pos = electrode2_pos
+        self.epsilon_r = epsilon_r
+        self.epsilon_0 = 8.854187817e-12  # F/m
+        
+        # Génération du maillage
+        self.generate_mesh()
+        
+    def generate_mesh(self):
+        """
+        Génère un maillage triangulaire structuré
+        """
+        # Grille de nœuds
+        x = np.linspace(0, self.length, self.nx)
+        y = np.linspace(0, self.height, self.ny)
+        X, Y = np.meshgrid(x, y)
+        
+        # Coordonnées des nœuds (flatten)
+        self.nodes = np.column_stack([X.ravel(), Y.ravel()])
+        self.n_nodes = len(self.nodes)
+        
+        # Génération des triangles (2 triangles par rectangle)
+        triangles = []
+        for j in range(self.ny - 1):
+            for i in range(self.nx - 1):
+                # Indices des 4 coins du rectangle
+                n0 = j * self.nx + i
+                n1 = j * self.nx + (i + 1)
+                n2 = (j + 1) * self.nx + (i + 1)
+                n3 = (j + 1) * self.nx + i
+                
+                # Triangle 1: n0-n1-n3
+                triangles.append([n0, n1, n3])
+                # Triangle 2: n1-n2-n3
+                triangles.append([n1, n2, n3])
+        
+        self.elements = np.array(triangles)
+        self.n_elements = len(self.elements)
+        
+        # Identification des nœuds sur la face supérieure (y = height)
+        top_nodes_mask = np.abs(self.nodes[:, 1] - self.height) < 1e-10
+        top_nodes_indices = np.where(top_nodes_mask)[0]
+        
+        # Électrode 1: nœuds sur la face supérieure entre electrode1_pos[0] et electrode1_pos[1]
+        x1_start, x1_end = self.electrode1_pos
+        self.electrode1_nodes = top_nodes_indices[
+            (self.nodes[top_nodes_indices, 0] >= x1_start) & 
+            (self.nodes[top_nodes_indices, 0] <= x1_end)
+        ]
+        
+        # Électrode 2: nœuds sur la face supérieure entre electrode2_pos[0] et electrode2_pos[1]
+        if self.use_electrode2 and self.electrode2_pos is not None:
+            x2_start, x2_end = self.electrode2_pos
+            self.electrode2_nodes = top_nodes_indices[
+                (self.nodes[top_nodes_indices, 0] >= x2_start) & 
+                (self.nodes[top_nodes_indices, 0] <= x2_end)
+            ]
+        else:
+            self.electrode2_nodes = np.array([])
+        
+        
+        # Face inférieure (masse/référence)
+        self.bottom_nodes = np.where(np.abs(self.nodes[:, 1]) < 1e-10)[0]
+        
+        print(f"Maillage généré: {self.n_nodes} nœuds, {self.n_elements} éléments")
+        print(f"Électrode 1: {len(self.electrode1_nodes)} nœuds (x = {x1_start:.2f} à {x1_end:.2f})")
+        if self.use_electrode2:
+            print(f"Électrode 2: {len(self.electrode2_nodes)} nœuds (x = {x2_start:.2f} à {x2_end:.2f})")
+        
+    def local_stiffness_matrix(self, elem_nodes):
+        """
+        Calcule la matrice de rigidité locale pour un élément triangulaire
+        """
+        # Coordonnées des nœuds
+        x1, y1 = elem_nodes[0]
+        x2, y2 = elem_nodes[1]
+        x3, y3 = elem_nodes[2]
+        
+        # Aire du triangle
+        area = 0.5 * abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1))
+        
+        if area < 1e-15:
+            return np.zeros((3, 3))
+        
+        # Dérivées des fonctions de forme
+        b = np.array([y2 - y3, y3 - y1, y1 - y2])
+        c = np.array([x3 - x2, x1 - x3, x2 - x1])
+        
+        # Matrice de rigidité locale
+        K_local = np.zeros((3, 3))
+        epsilon = self.epsilon_0 * self.epsilon_r
+        
+        for i in range(3):
+            for j in range(3):
+                K_local[i, j] = (epsilon / (4 * area)) * (b[i] * b[j] + c[i] * c[j])
+        
+        return K_local
+    
+    def assemble_global_matrix(self):
+        """
+        Assemble la matrice globale de rigidité
+        """
+        K = lil_matrix((self.n_nodes, self.n_nodes))
+        
+        # Boucle sur tous les éléments
+        for elem_idx, elem in enumerate(self.elements):
+            # Coordonnées des nœuds de l'élément
+            elem_nodes = self.nodes[elem]
+            
+            # Matrice de rigidité locale
+            K_local = self.local_stiffness_matrix(elem_nodes)
+            
+            # Assemblage dans la matrice globale
+            for i in range(3):
+                for j in range(3):
+                    K[elem[i], elem[j]] += K_local[i, j]
+        
+        return K.tocsr()
+    
+    def apply_boundary_conditions(self, K, F, V_electrode1=100.0, V_electrode2=0.0, V_bottom=0.0):
+        """
+        Applique les conditions aux limites de Dirichlet
+        
+        Parameters:
+        -----------
+        K : sparse matrix
+            Matrice de rigidité
+        F : array
+            Vecteur force (second membre)
+        V_electrode1 : float
+            Potentiel à l'électrode 1
+        V_electrode2 : float
+            Potentiel à l'électrode 2
+        V_bottom : float
+            Potentiel à la face inférieure (référence/masse)
+        """
+        K_mod = K.tolil()
+        F_mod = F.copy()
+        
+        bc_nodes = {}
+        
+        # Électrode 1
+        for node in self.electrode1_nodes:
+            bc_nodes[node] = V_electrode1
+            K_mod[node, :] = 0
+            K_mod[node, node] = 1
+            F_mod[node] = V_electrode1
+        
+        # Électrode 2
+        if self.use_electrode2:
+            for node in self.electrode2_nodes:
+                bc_nodes[node] = V_electrode2
+                K_mod[node, :] = 0
+                K_mod[node, node] = 1
+                F_mod[node] = V_electrode2
+        # Face inférieure (masse)
+        for node in self.bottom_nodes:
+            bc_nodes[node] = V_bottom
+            K_mod[node, :] = 0
+            K_mod[node, node] = 1
+            F_mod[node] = V_bottom
+        
+        return K_mod.tocsr(), F_mod, bc_nodes
+    
+    def solve(self, V_electrode1=100.0, V_electrode2=0.0, V_bottom=0.0):
+        """
+        Résout le système d'équations
+        """
+        print("\nAssemblage de la matrice de rigidité globale...")
+        K = self.assemble_global_matrix()
+        
+        # Vecteur force (nul pour l'équation de Laplace homogène)
+        F = np.zeros(self.n_nodes)
+        
+        print("Application des conditions aux limites...")
+        K_mod, F_mod, bc_nodes = self.apply_boundary_conditions(
+            K, F, V_electrode1, V_electrode2, V_bottom)
+        
+        print("Résolution du système linéaire...")
+        self.phi = spsolve(K_mod, F_mod)
+        
+        print(f"Solution obtenue: min(φ) = {self.phi.min():.2f} V, "
+              f"max(φ) = {self.phi.max():.2f} V")
+        
+        return self.phi
+    
+    def compute_electric_field(self):
+        """
+        Calcule le champ électrique E = -∇φ
+        """
+        E = np.zeros((self.n_elements, 2))
+        
+        for elem_idx, elem in enumerate(self.elements):
+            # Coordonnées et potentiels des nœuds
+            x1, y1 = self.nodes[elem[0]]
+            x2, y2 = self.nodes[elem[1]]
+            x3, y3 = self.nodes[elem[2]]
+            
+            phi1 = self.phi[elem[0]]
+            phi2 = self.phi[elem[1]]
+            phi3 = self.phi[elem[2]]
+            
+            # Aire du triangle
+            area = 0.5 * abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1))
+            
+            if area < 1e-15:
+                continue
+            
+            # Dérivées des fonctions de forme
+            b = np.array([y2 - y3, y3 - y1, y1 - y2])
+            c = np.array([x3 - x2, x1 - x3, x2 - x1])
+            
+            # Gradient du potentiel
+            dphi_dx = (b[0] * phi1 + b[1] * phi2 + b[2] * phi3) / (2 * area)
+            dphi_dy = (c[0] * phi1 + c[1] * phi2 + c[2] * phi3) / (2 * area)
+            
+            # Champ électrique E = -∇φ
+            E[elem_idx, 0] = -dphi_dx
+            E[elem_idx, 1] = -dphi_dy
+        
+        self.E_field = E
+        E_magnitude = np.linalg.norm(E, axis=1)
+        print(f"Champ électrique calculé: max(|E|) = {E_magnitude.max():.2f} V/m")
+        
+        return E
+    
+    def plot_results(self, V_electrode1=100.0, V_electrode2=0.0, V_bottom=0.0):
+        """
+        Visualise les résultats avec électrodes coplanaires
+        """
+        # Créer la triangulation
+        tri = Triangulation(self.nodes[:, 0], self.nodes[:, 1], self.elements)
+        
+        # Calculer la magnitude du champ électrique
+        E_magnitude = np.linalg.norm(self.E_field, axis=1)
+        
+        # Figure principale
+        fig = plt.figure(figsize=(18, 12))
+        
+        # 1. Maillage avec électrodes
+        ax1 = fig.add_subplot(231)
+        ax1.triplot(tri, 'k-', linewidth=0.2, alpha=0.3)
+        
+        # Dessiner les électrodes
+        x1_start, x1_end = self.electrode1_pos
+        if self.use_electrode2:
+            x2_start, x2_end = self.electrode2_pos
+        
+        electrode1_patch = patches.Rectangle(
+            (x1_start, self.height - 0.01), x1_end - x1_start, 0.02,
+            linewidth=2, edgecolor='red', facecolor='red', alpha=0.7, 
+            label=f'Électrode 1 ({V_electrode1}V)')
+        if self.use_electrode2:
+            electrode2_patch = patches.Rectangle(
+                (x2_start, self.height - 0.01), x2_end - x2_start, 0.02,
+                linewidth=2, edgecolor='blue', facecolor='blue', alpha=0.7,
+                label=f'Électrode 2 ({V_electrode2}V)')
+        
+        ax1.add_patch(electrode1_patch)
+        if self.use_electrode2:
+            ax1.add_patch(electrode2_patch)
+        
+        # Marquer les nœuds des électrodes
+        ax1.plot(self.nodes[self.electrode1_nodes, 0], 
+                self.nodes[self.electrode1_nodes, 1], 
+                'ro', markersize=4, alpha=0.8)
+        if self.use_electrode2:
+            ax1.plot(self.nodes[self.electrode2_nodes, 0], 
+                    self.nodes[self.electrode2_nodes, 1], 
+                    'bo', markersize=4, alpha=0.8)
+        
+        ax1.set_xlabel('x (m)', fontsize=11)
+        ax1.set_ylabel('y (m)', fontsize=11)
+        ax1.set_title('Maillage avec électrodes coplanaires', fontsize=12, fontweight='bold')
+        ax1.legend(fontsize=9)
+        ax1.set_aspect('equal')
+        ax1.grid(True, alpha=0.2)
+        
+        # 2. Distribution du potentiel
+        ax2 = fig.add_subplot(232)
+        levels = np.linspace(self.phi.min(), self.phi.max(), 25)
+        contourf = ax2.tricontourf(tri, self.phi, levels=levels, cmap='RdYlBu_r')
+        cbar2 = plt.colorbar(contourf, ax=ax2, label='Potentiel φ (V)')
+        ax2.set_xlabel('x (m)', fontsize=11)
+        ax2.set_ylabel('y (m)', fontsize=11)
+        ax2.set_title('Distribution du potentiel électrique', fontsize=12, fontweight='bold')
+        ax2.set_aspect('equal')
+        
+        # Ajouter les électrodes
+        ax2.add_patch(patches.Rectangle((x1_start, self.height - 0.01), 
+                                        x1_end - x1_start, 0.02,
+                                        linewidth=2, edgecolor='red', 
+                                        facecolor='red', alpha=0.8))
+        if self.use_electrode2:
+            ax2.add_patch(patches.Rectangle((x2_start, self.height - 0.01), 
+                                            x2_end - x2_start, 0.02,
+                                            linewidth=2, edgecolor='blue', 
+                                            facecolor='blue', alpha=0.8))
+        
+        # 3. Lignes équipotentielles
+        ax3 = fig.add_subplot(233)
+        contour = ax3.tricontourf(tri, self.phi, levels=levels, cmap='RdYlBu_r', alpha=0.6)
+        ax3.tricontour(tri, self.phi, levels=20, colors='black', linewidths=1, alpha=0.8)
+        cbar3 = plt.colorbar(contour, ax=ax3, label='Potentiel φ (V)')
+        ax3.set_xlabel('x (m)', fontsize=11)
+        ax3.set_ylabel('y (m)', fontsize=11)
+        ax3.set_title('Lignes équipotentielles', fontsize=12, fontweight='bold')
+        ax3.set_aspect('equal')
+        
+        
+       
+        # --- Coupe verticale ---
+        fig2, (ax_cut, ax_h) = plt.subplots(1, 2, figsize=(12, 4))
+
+        # Choix automatique de la position de coupe
+        if self.use_electrode2 and self.electrode2_pos is not None:
+            x1_end = self.electrode1_pos[1]
+            x2_start = self.electrode2_pos[0]
+            x_cut = (x1_end + x2_start) / 2  # entre électrodes
+        else:
+            # Si une seule électrode → coupe au centre du domaine
+            x_cut = self.length / 2
+
+        # Extraction des points
+        tol = self.length / (4 * self.nx)
+        mask = np.abs(self.nodes[:, 0] - x_cut) < tol
+
+        y_cut = self.nodes[mask, 1]
+        phi_cut = self.phi[mask]
+
+        # Tri
+        sort_idx = np.argsort(y_cut)
+
+        # Plot φ = f(y)
+        ax_cut.plot(phi_cut[sort_idx], y_cut[sort_idx], 'b-o',
+                    linewidth=2, markersize=4)
+
+        ax_cut.set_xlabel('Potentiel φ (V)')
+        ax_cut.set_ylabel('Hauteur y (m)')
+        ax_cut.set_title(f'Coupe verticale (x = {x_cut:.3f} m)')
+        ax_cut.grid(True, alpha=0.3)
+
+        ax_cut.axhline(y=self.height, linestyle='--', alpha=0.5)
+        ax_cut.axhline(y=0, linestyle='--', alpha=0.5)
+
+
+        # --- Coupes horizontales ---
+        heights = [0.2*self.height, 0.5*self.height, 0.8*self.height]
+
+        for h in heights:
+            tol = self.height / (4 * self.ny)
+            mask = np.abs(self.nodes[:, 1] - h) < tol
+
+            x_h = self.nodes[mask, 0]
+            phi_h = self.phi[mask]
+
+            sort_idx = np.argsort(x_h)
+
+            ax_h.plot(x_h[sort_idx], phi_h[sort_idx],
+                    '-o', linewidth=2, markersize=3,
+                    label=f'y = {h:.2f} m')
+
+        # Visualisation électrode(s)
+        ax_h.axvspan(self.electrode1_pos[0], self.electrode1_pos[1],
+                    alpha=0.2, color='red', label='Électrode 1')
+
+        if self.use_electrode2 and self.electrode2_pos is not None:
+            ax_h.axvspan(self.electrode2_pos[0], self.electrode2_pos[1],
+                        alpha=0.2, color='blue', label='Électrode 2')
+
+        ax_h.set_xlabel('Position x (m)')
+        ax_h.set_ylabel('Potentiel φ (V)')
+        ax_h.set_title('Coupes horizontales')
+        ax_h.legend()
+        ax_h.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig('coplanar_electrodes_results.png', 
+                   dpi=150, bbox_inches='tight')
+        print("\nFigure sauvegardée: coplanar_electrodes_results.png")
+        
+        
+        plt.show()
+
+def main():
+    """
+    Fonction principale
+    """
+    print("=" * 80)
+    print("SIMULATION FEM - ÉLECTRODES COPLANAIRES SUR FACE SUPÉRIEURE")
+    print("=" * 80)
+    
+    # Configuration
+    length = 1.0
+    height = 0.5
+    nx = 60
+    ny = 40
+    epsilon_r = 4.0
+    
+    # Positions des électrodes sur la face supérieure (en x)
+    electrode1_pos = (0.4, 0.6)  # Électrode 1: de x=0.15 à x=0.35
+    electrode2_pos =None#(0.65,0.85)  # Électrode 2: de x=0.65 à x=0.85
+    use_electrode2 = False
+    
+    # Potentiels
+    V_electrode1 = 1.0   # Électrode 1 (positive)
+    V_electrode2 = -100.0  # Électrode 2 (négative)
+    V_bottom = 0.0         # Face inférieure (référence/masse)
+    
+    print(f"\nConfiguration:")
+    print(f"  - Dimensions: {length} m × {height} m")
+    print(f"  - Résolution: {nx} × {ny} nœuds")
+    print(f"  - Permittivité relative: εr = {epsilon_r}")
+    print(f"  - Électrode 1: x ∈ [{electrode1_pos[0]}, {electrode1_pos[1]}] m, V = {V_electrode1} V")
+    if use_electrode2:
+        print(f"  - Électrode 2: x ∈ [{electrode2_pos[0]}, {electrode2_pos[1]}] m, V = {V_electrode2} V")
+    print(f"  - Face inférieure: V = {V_bottom} V (référence)")
+    
+    # Créer le problème
+    print("\n1. Initialisation...")
+    fem = CoplanarElectrodesFEM(use_electrode2,length, height, nx, ny, 
+                                electrode1_pos, electrode2_pos, epsilon_r)
+    
+    # Résoudre
+    print("\n2. Résolution...")
+    phi = fem.solve(V_electrode1, V_electrode2, V_bottom)
+    
+    # Calculer le champ
+    print("\n3. Calcul du champ électrique...")
+    E = fem.compute_electric_field()
+    
+    # Sauvegarder
+    print("\n4. Sauvegarde des données...")
+    np.savez('coplanar_data.npz',
+             nodes=fem.nodes,
+             elements=fem.elements,
+             phi=phi,
+             E_field=E,
+             electrode1_nodes=fem.electrode1_nodes,
+             electrode2_nodes=fem.electrode2_nodes,
+             parameters={'length': length, 'height': height,
+                        'electrode1_pos': electrode1_pos,
+                        'electrode2_pos': electrode2_pos,
+                        'epsilon_r': epsilon_r,
+                        'V_electrode1': V_electrode1,
+                        'V_electrode2': V_electrode2,
+                        'V_bottom': V_bottom})
+    print("   Données sauvegardées: coplanar_data.npz")
+    
+    # Visualiser
+    print("\n5. Génération des graphiques...")
+    fem.plot_results(V_electrode1, V_electrode2, V_bottom)
+    
+    print("\n" + "=" * 80)
+    print("SIMULATION TERMINÉE!")
+    print("=" * 80)
+    
+    return fem
+
+
+if __name__ == '__main__':
+    fem = main()
