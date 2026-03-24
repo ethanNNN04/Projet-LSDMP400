@@ -248,21 +248,22 @@ class CoplanarElectrodesFEM:
         """
         tri = Triangulation(self.nodes[:, 0], self.nodes[:, 1], self.elements)
         E_magnitude = np.linalg.norm(self.E_field, axis=1)
-        
-        # Figure principale
-        fig = plt.figure(figsize=(18, 12))
-        
-        # 1. Maillage avec électrodes
-        ax1 = fig.add_subplot(231)
-        ax1.triplot(tri, 'k-', linewidth=0.2, alpha=0.3)
-        
+
+        # Figure principale : 3 sous-graphiques côte à côte
+        fig = plt.figure(figsize=(20, 6))
+        fig.subplots_adjust(left=0.06, right=0.97, top=0.88, bottom=0.12, wspace=0.45)
+
         x1_start, x1_end = self.electrode1_pos
         if self.use_electrode2:
             x2_start, x2_end = self.electrode2_pos
-        
+
+        # 1. Maillage avec électrodes
+        ax1 = fig.add_subplot(131)
+        ax1.triplot(tri, 'k-', linewidth=0.2, alpha=0.3)
+
         electrode1_patch = patches.Rectangle(
             (x1_start, self.height - 0.01), x1_end - x1_start, 0.02,
-            linewidth=2, edgecolor='red', facecolor='red', alpha=0.7, 
+            linewidth=2, edgecolor='red', facecolor='red', alpha=0.7,
             label=f'Électrode 1 ({V_electrode1}V)')
         ax1.add_patch(electrode1_patch)
         if self.use_electrode2:
@@ -271,58 +272,74 @@ class CoplanarElectrodesFEM:
                 linewidth=2, edgecolor='blue', facecolor='blue', alpha=0.7,
                 label=f'Électrode 2 ({V_electrode2}V)')
             ax1.add_patch(electrode2_patch)
-        
-        ax1.plot(self.nodes[self.electrode1_nodes, 0], 
-                self.nodes[self.electrode1_nodes, 1], 
+
+        ax1.plot(self.nodes[self.electrode1_nodes, 0],
+                self.nodes[self.electrode1_nodes, 1],
                 'ro', markersize=4, alpha=0.8)
         if self.use_electrode2:
-            ax1.plot(self.nodes[self.electrode2_nodes, 0], 
-                    self.nodes[self.electrode2_nodes, 1], 
+            ax1.plot(self.nodes[self.electrode2_nodes, 0],
+                    self.nodes[self.electrode2_nodes, 1],
                     'bo', markersize=4, alpha=0.8)
-        
-        ax1.set_xlabel('x (m)', fontsize=11)
-        ax1.set_ylabel('y (m)', fontsize=11)
-        ax1.set_title('Maillage avec électrodes coplanaires', fontsize=12, fontweight='bold')
-        ax1.legend(fontsize=9)
+
+        ax1.set_xlabel('x (m)', fontsize=10)
+        ax1.set_ylabel('y (m)', fontsize=10)
+        ax1.set_title('Maillage avec électrodes\ncoplanaires', fontsize=11,
+                      fontweight='bold', pad=8)
+        ax1.set_xlim(0, self.length)
+        ax1.set_ylim(0, self.height)
+        ax1.legend(fontsize=8, loc='lower left')
         ax1.set_aspect('equal')
         ax1.grid(True, alpha=0.2)
-        
+        ax1.tick_params(labelsize=9)
+
         # 2. Distribution du potentiel
-        ax2 = fig.add_subplot(232)
+        ax2 = fig.add_subplot(132)
         levels = np.linspace(self.phi.min(), self.phi.max(), 25)
-        contourf = ax2.tricontourf(tri, self.phi, levels=levels, cmap='RdYlBu_r')
-        cbar2 = plt.colorbar(contourf, ax=ax2, label='Potentiel φ (V)')
-        ax2.set_xlabel('x (m)', fontsize=11)
-        ax2.set_ylabel('y (m)', fontsize=11)
-        ax2.set_title('Distribution du potentiel électrique', fontsize=12, fontweight='bold')
+        contourf2 = ax2.tricontourf(tri, self.phi, levels=levels, cmap='RdYlBu_r')
+        cbar2 = plt.colorbar(contourf2, ax=ax2, label='Potentiel φ (V)',
+                             fraction=0.046, pad=0.04)
+        cbar2.ax.tick_params(labelsize=8)
+        cbar2.set_label('Potentiel φ (V)', fontsize=9)
+        ax2.set_xlabel('x (m)', fontsize=10)
+        ax2.set_ylabel('y (m)', fontsize=10)
+        ax2.set_title('Distribution du potentiel\nélectrique', fontsize=11,
+                      fontweight='bold', pad=8)
         ax2.set_aspect('equal')
-        
-        ax2.add_patch(patches.Rectangle((x1_start, self.height - 0.01), 
+        ax2.tick_params(labelsize=9)
+
+        ax2.add_patch(patches.Rectangle((x1_start, self.height - 0.01),
                                         x1_end - x1_start, 0.02,
-                                        linewidth=2, edgecolor='red', 
+                                        linewidth=2, edgecolor='red',
                                         facecolor='red', alpha=0.8))
         if self.use_electrode2:
-            ax2.add_patch(patches.Rectangle((x2_start, self.height - 0.01), 
+            ax2.add_patch(patches.Rectangle((x2_start, self.height - 0.01),
                                             x2_end - x2_start, 0.02,
-                                            linewidth=2, edgecolor='blue', 
+                                            linewidth=2, edgecolor='blue',
                                             facecolor='blue', alpha=0.8))
-        
+
         # 3. Lignes équipotentielles
-        ax3 = fig.add_subplot(233)
-        contour = ax3.tricontourf(tri, self.phi, levels=levels, cmap='RdYlBu_r', alpha=0.6)
+        ax3 = fig.add_subplot(133)
+        contourf3 = ax3.tricontourf(tri, self.phi, levels=levels, cmap='RdYlBu_r', alpha=0.6)
         ax3.tricontour(tri, self.phi, levels=20, colors='black', linewidths=1, alpha=0.8)
-        cbar3 = plt.colorbar(contour, ax=ax3, label='Potentiel φ (V)')
-        ax3.set_xlabel('x (m)', fontsize=11)
-        ax3.set_ylabel('y (m)', fontsize=11)
-        ax3.set_title('Lignes équipotentielles', fontsize=12, fontweight='bold')
+        cbar3 = plt.colorbar(contourf3, ax=ax3, label='Potentiel φ (V)',
+                             fraction=0.046, pad=0.04)
+        cbar3.ax.tick_params(labelsize=8)
+        cbar3.set_label('Potentiel φ (V)', fontsize=9)
+        ax3.set_xlabel('x (m)', fontsize=10)
+        ax3.set_ylabel('y (m)', fontsize=10)
+        ax3.set_title('Lignes équipotentielles', fontsize=11,
+                      fontweight='bold', pad=8)
         ax3.set_aspect('equal')
+        ax3.tick_params(labelsize=9)
+
+        plt.savefig('coplanar_electrodes_results.png', dpi=150, bbox_inches='tight')
+        print("\nFigure 1 sauvegardée: coplanar_electrodes_results.png")
 
         # ── Figure 2 : profils V(y) et V(x) ──────────────────────────────────
-        fig2, (ax_cut, ax_h) = plt.subplots(1, 2, figsize=(12, 4))
+        fig2, (ax_cut, ax_h) = plt.subplots(1, 2, figsize=(14, 5))
+        fig2.subplots_adjust(left=0.08, right=0.97, top=0.88, bottom=0.13, wspace=0.35)
 
-        # Liste des abscisses pour les profils V(y) :
-        #   - valeurs fournies par l'utilisateur (X_CUTS) si non None
-        #   - sinon : 5 abscisses réparties automatiquement sur le domaine
+        # Liste des abscisses pour les profils V(y)
         if x_cuts is not None:
             x_cuts_used = x_cuts
         else:
@@ -331,39 +348,40 @@ class CoplanarElectrodesFEM:
         # Validation
         for xc in x_cuts_used:
             if not (0 <= xc <= self.length):
-                raise ValueError(f"X_CUTS contient {xc} m qui sort du domaine [0, {self.length}] m.")
+                raise ValueError(
+                    f"X_CUTS contient {xc} m qui sort du domaine [0, {self.length}] m.")
 
         tol = self.length / (4 * self.nx)
         colors_vy = plt.cm.tab10(np.linspace(0, 0.9, len(x_cuts_used)))
 
         for xc, col in zip(x_cuts_used, colors_vy):
-            # Snap vers l'abscisse de maillage la plus proche
-            x_mesh   = np.unique(self.nodes[:, 0])
-            xc_snap  = x_mesh[np.argmin(np.abs(x_mesh - xc))]
-            mask     = np.abs(self.nodes[:, 0] - xc_snap) < tol
-            y_vals   = self.nodes[mask, 1]
+            x_mesh  = np.unique(self.nodes[:, 0])
+            xc_snap = x_mesh[np.argmin(np.abs(x_mesh - xc))]
+            mask    = np.abs(self.nodes[:, 0] - xc_snap) < tol
+            y_vals  = self.nodes[mask, 1]
             phi_vals = self.phi[mask]
-            si       = np.argsort(y_vals)
+            si      = np.argsort(y_vals)
             ax_cut.plot(y_vals[si], phi_vals[si], '-o', color=col,
                         linewidth=2, markersize=4, label=f'x = {xc_snap:.3f} m')
 
         ax_cut.axvline(x=self.height, linestyle='--', color='red', alpha=0.6,
                        label=f'Face sup. (y={self.height} m)')
-        ax_cut.axvline(x=0,           linestyle='--', color='black', alpha=0.6,
+        ax_cut.axvline(x=0, linestyle='--', color='black', alpha=0.6,
                        label=f'Face inf. — V={V_bottom} V')
-        ax_cut.set_xlabel('y (m)', fontsize=11)
-        ax_cut.set_ylabel('Potentiel φ (V)', fontsize=11)
-        ax_cut.set_title('Profils V(y) à différentes abscisses x',
-                         fontsize=12, fontweight='bold')
+        ax_cut.set_xlabel('y (m)', fontsize=10)
+        ax_cut.set_ylabel('Potentiel φ (V)', fontsize=10)
+        ax_cut.set_title('Profils V(y) à différentes\nabscisses x',
+                         fontsize=11, fontweight='bold', pad=8)
         ax_cut.set_xlim(0, self.height)
-        ax_cut.legend(fontsize=9)
+        ax_cut.legend(fontsize=8, loc='best')
         ax_cut.grid(True, alpha=0.3)
+        ax_cut.tick_params(labelsize=9)
 
         # ── Profil V(x) : coupes horizontales à plusieurs hauteurs ────────────
         heights = [0.2 * self.height, 0.5 * self.height, 0.8 * self.height]
 
         for h in heights:
-            tol_h = self.height / (4 * self.ny)
+            tol_h  = self.height / (4 * self.ny)
             mask_h = np.abs(self.nodes[:, 1] - h) < tol_h
             x_h    = self.nodes[mask_h, 0]
             phi_h  = self.phi[mask_h]
@@ -377,16 +395,17 @@ class CoplanarElectrodesFEM:
             ax_h.axvspan(self.electrode2_pos[0], self.electrode2_pos[1],
                          alpha=0.2, color='blue', label='Électrode 2')
 
-        ax_h.set_xlabel('Position x (m)', fontsize=11)
-        ax_h.set_ylabel('Potentiel φ (V)', fontsize=11)
-        ax_h.set_title('Profils V(x) à différentes hauteurs',
-                       fontsize=12, fontweight='bold')
-        ax_h.legend(fontsize=9)
+        ax_h.set_xlabel('Position x (m)', fontsize=10)
+        ax_h.set_ylabel('Potentiel φ (V)', fontsize=10)
+        ax_h.set_title('Profils V(x) à différentes\nhauteurs',
+                       fontsize=11, fontweight='bold', pad=8)
+        ax_h.set_xlim(0, self.length)
+        ax_h.legend(fontsize=8, loc='best')
         ax_h.grid(True, alpha=0.3)
+        ax_h.tick_params(labelsize=9)
 
-        plt.tight_layout()
-        plt.savefig('coplanar_electrodes_results.png', dpi=150, bbox_inches='tight')
-        print("\nFigure sauvegardée: coplanar_electrodes_results.png")
+        plt.savefig('coplanar_electrodes_profiles.png', dpi=150, bbox_inches='tight')
+        print("Figure 2 sauvegardée: coplanar_electrodes_profiles.png")
         plt.show()
 
 
@@ -467,3 +486,5 @@ def main():
 
 if __name__ == '__main__':
     fem = main()
+
+    
