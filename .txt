@@ -1028,3 +1028,620 @@ if __name__ == '__main__':
     fem = main()
 
 #12/03/2026
+
+
+
+
+
+
+
+
+
+
+
+
+--------------------------------------------------------------
+
+
+--------------------------------------------------------------
+
+
+
+--------------------------------------------------------------
+#28/04/2026
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from scipy.sparse import lil_matrix
+from scipy.sparse.linalg import spsolve
+
+from matplotlib.tri import Triangulation
+import matplotlib.patches as patches
+
+
+class CoplanarElectrodesFEM:
+
+    def __init__(
+        self,
+        use_electrode2=False,
+        length=1.0,
+        height=0.5,
+        nx=60,
+        ny=40,
+        electrode1_pos=(0.4,0.6),  # ELECTRODE AU MILIEU
+        electrode2_pos=None,
+        epsilon_r=4.0
+    ):
+
+        self.use_electrode2=use_electrode2
+
+        self.length=length
+        self.height=height
+
+        self.nx=nx
+        self.ny=ny
+
+        self.electrode1_pos=electrode1_pos
+        self.electrode2_pos=electrode2_pos
+
+        self.epsilon_r=epsilon_r
+        self.epsilon_0=8.854187817e-12
+
+        self.generate_mesh()
+
+
+    # ---------------------------------------------------
+    def generate_mesh(self):
+
+        x=np.linspace(
+            0,
+            self.length,
+            self.nx
+        )
+
+        y=np.linspace(
+            0,
+            self.height,
+            self.ny
+        )
+
+        X,Y=np.meshgrid(x,y)
+
+        self.nodes=np.column_stack(
+            [X.ravel(),Y.ravel()]
+        )
+
+        self.n_nodes=len(
+            self.nodes
+        )
+
+        triangles=[]
+
+        for j in range(self.ny-1):
+            for i in range(self.nx-1):
+
+                n0=j*self.nx+i
+                n1=j*self.nx+i+1
+                n2=(j+1)*self.nx+i+1
+                n3=(j+1)*self.nx+i
+
+                triangles.append(
+                    [n0,n1,n3]
+                )
+
+                triangles.append(
+                    [n1,n2,n3]
+                )
+
+        self.elements=np.array(
+            triangles
+        )
+
+        self.n_elements=len(
+            self.elements
+        )
+
+        top=np.where(
+            abs(
+                self.nodes[:,1]-self.height
+            )<1e-12
+        )[0]
+
+        x1a,x1b=self.electrode1_pos
+
+        self.electrode1_nodes=top[
+            (self.nodes[top,0]>=x1a)
+            &
+            (self.nodes[top,0]<=x1b)
+        ]
+
+        self.bottom_nodes=np.where(
+            abs(
+                self.nodes[:,1]
+            )<1e-12
+        )[0]
+
+        print()
+        print(
+            f"{self.n_nodes} noeuds"
+        )
+
+        print(
+            f"{self.n_elements} triangles"
+        )
+
+        print(
+            f"electrode centree : "
+            f"{x1a} -> {x1b}"
+        )
+
+
+    # ---------------------------------------------------
+    def local_stiffness_matrix(
+        self,
+        elem_nodes
+    ):
+
+        x1,y1=elem_nodes[0]
+        x2,y2=elem_nodes[1]
+        x3,y3=elem_nodes[2]
+
+        area=0.5*abs(
+            (x2-x1)*(y3-y1)
+            -
+            (x3-x1)*(y2-y1)
+        )
+
+        if area<1e-15:
+            return np.zeros(
+                (3,3)
+            )
+
+        b=np.array(
+            [
+                y2-y3,
+                y3-y1,
+                y1-y2
+            ]
+        )
+
+        c=np.array(
+            [
+                x3-x2,
+                x1-x3,
+                x2-x1
+            ]
+        )
+
+        eps=self.epsilon_0*self.epsilon_r
+
+        K=np.zeros(
+            (3,3)
+        )
+
+        for i in range(3):
+            for j in range(3):
+
+                K[i,j]=(
+                    eps/(4*area)
+                )*(
+                    b[i]*b[j]
+                    +
+                    c[i]*c[j]
+                )
+
+        return K
+
+
+    # ---------------------------------------------------
+    def assemble_global_matrix(self):
+
+        K=lil_matrix(
+            (
+                self.n_nodes,
+                self.n_nodes
+            )
+        )
+
+        for elem in self.elements:
+
+            Ke=self.local_stiffness_matrix(
+                self.nodes[elem]
+            )
+
+            for i in range(3):
+                for j in range(3):
+
+                    K[
+                        elem[i],
+                        elem[j]
+                    ]+=Ke[i,j]
+
+        return K
+
+
+    # ---------------------------------------------------
+    def apply_boundary_conditions(
+        self,
+        K,
+        F,
+        Ve=1.0,
+        Vbottom=0.0
+    ):
+
+        K=K.tolil()
+
+        for node in self.electrode1_nodes:
+
+            K[node,:]=0
+            K[node,node]=1
+
+            F[node]=Ve
+
+        for node in self.bottom_nodes:
+
+            K[node,:]=0
+            K[node,node]=1
+
+            F[node]=Vbottom
+
+        return K.tocsr(),F
+
+
+    # ---------------------------------------------------
+    def solve(
+        self,
+        Ve=1.0,
+        Vbottom=0.0
+    ):
+
+        print(
+            "Assemblage..."
+        )
+
+        K=self.assemble_global_matrix()
+
+        F=np.zeros(
+            self.n_nodes
+        )
+
+        K,F=self.apply_boundary_conditions(
+            K,
+            F,
+            Ve,
+            Vbottom
+        )
+
+        print(
+            "Resolution..."
+        )
+
+        self.phi=spsolve(
+            K,
+            F
+        )
+
+        print(
+            "phi min/max:",
+            self.phi.min(),
+            self.phi.max()
+        )
+
+        return self.phi
+
+
+    # ---------------------------------------------------
+    def compute_electric_field(self):
+
+        E=np.zeros(
+            (
+                self.n_elements,
+                2
+            )
+        )
+
+        for e,elem in enumerate(
+            self.elements
+        ):
+
+            x1,y1=self.nodes[
+                elem[0]
+            ]
+
+            x2,y2=self.nodes[
+                elem[1]
+            ]
+
+            x3,y3=self.nodes[
+                elem[2]
+            ]
+
+            area=0.5*abs(
+                (x2-x1)*(y3-y1)
+                -
+                (x3-x1)*(y2-y1)
+            )
+
+            if area<1e-15:
+                continue
+
+            b=np.array(
+                [
+                    y2-y3,
+                    y3-y1,
+                    y1-y2
+                ]
+            )
+
+            c=np.array(
+                [
+                    x3-x2,
+                    x1-x3,
+                    x2-x1
+                ]
+            )
+
+            ph=self.phi[elem]
+
+            dphidx=np.dot(
+                b,
+                ph
+            )/(2*area)
+
+            dphidy=np.dot(
+                c,
+                ph
+            )/(2*area)
+
+            E[e]=[
+                -dphidx,
+                -dphidy
+            ]
+
+        self.E_field=E
+
+        return E
+
+
+    # ---------------------------------------------------
+    def plot_results(self):
+
+        tri=Triangulation(
+            self.nodes[:,0],
+            self.nodes[:,1],
+            self.elements
+        )
+
+        fig,axs=plt.subplots(
+            1,
+            3,
+            figsize=(18,6)
+        )
+
+        x1a,x1b=self.electrode1_pos
+
+        # ----------------
+        axs[0].triplot(
+            tri,
+            linewidth=.3
+        )
+
+        rect=patches.Rectangle(
+            (
+                x1a,
+                self.height-0.01
+            ),
+            x1b-x1a,
+            0.02,
+            color='red'
+        )
+
+        axs[0].add_patch(
+            rect
+        )
+
+        axs[0].set_title(
+            "Maillage"
+        )
+
+        axs[0].set_aspect(
+            'equal'
+        )
+
+        # ----------------
+        levels=np.linspace(
+            self.phi.min(),
+            self.phi.max(),
+            30
+        )
+
+        c=axs[1].tricontourf(
+            tri,
+            self.phi,
+            levels=levels,
+            cmap='RdYlBu_r'
+        )
+
+        plt.colorbar(
+            c,
+            ax=axs[1]
+        )
+
+        axs[1].set_title(
+            "Potentiel"
+        )
+
+        axs[1].set_aspect(
+            'equal'
+        )
+
+        # ----------------
+        axs[2].tricontourf(
+            tri,
+            self.phi,
+            levels=levels,
+            alpha=.6
+        )
+
+        axs[2].tricontour(
+            tri,
+            self.phi,
+            levels=20,
+            colors='k'
+        )
+
+        axs[2].set_title(
+            "Equipotentielles"
+        )
+
+        axs[2].set_aspect(
+            'equal'
+        )
+
+        plt.tight_layout()
+        plt.show()
+
+
+        # profils
+        fig2,(ax1,ax2)=plt.subplots(
+            1,2,
+            figsize=(14,5)
+        )
+
+        xcuts=[
+            0.25,
+            0.5,
+            0.75
+        ]
+
+        for xc in xcuts:
+
+            xs=self.nodes[:,0]
+
+            xsnap=xs[
+                np.argmin(
+                    abs(xs-xc)
+                )
+            ]
+
+            mask=abs(
+                self.nodes[:,0]-xsnap
+            )<1e-12
+
+            y=self.nodes[
+                mask,1
+            ]
+
+            v=self.phi[
+                mask
+            ]
+
+            I=np.argsort(y)
+
+            ax1.plot(
+                y[I],
+                v[I],
+                '-o',
+                label=f"x={xc}"
+            )
+
+        ax1.grid()
+        ax1.legend()
+        ax1.set_title(
+            "Profils V(y)"
+        )
+
+        heights=[
+            0.125,
+            0.25,
+            0.375
+        ]
+
+        for h in heights:
+
+            ys=self.nodes[:,1]
+
+            ysnap=ys[
+                np.argmin(
+                    abs(ys-h)
+                )
+            ]
+
+            mask=abs(
+                self.nodes[:,1]-ysnap
+            )<1e-12
+
+            x=self.nodes[
+                mask,0
+            ]
+
+            v=self.phi[
+                mask
+            ]
+
+            I=np.argsort(x)
+
+            ax2.plot(
+                x[I],
+                v[I],
+                '-o',
+                label=f"y={h}"
+            )
+
+        ax2.grid()
+        ax2.legend()
+
+        ax2.set_title(
+            "Profils V(x)"
+        )
+
+        plt.tight_layout()
+        plt.show()
+
+
+# =================================================
+def main():
+
+    length=1.0
+    height=0.5
+
+    nx=60
+    ny=40
+
+    epsilon_r=4.0
+
+    # ELECTRODE AU MILIEU
+    electrode_width=0.2
+
+    electrode1_pos=(
+        (length-electrode_width)/2,
+        (length+electrode_width)/2
+    )
+
+    Ve=1
+    Vbottom=0
+
+    fem=CoplanarElectrodesFEM(
+        length=length,
+        height=height,
+        nx=nx,
+        ny=ny,
+        electrode1_pos=electrode1_pos,
+        epsilon_r=epsilon_r
+    )
+
+    fem.solve(
+        Ve=Ve,
+        Vbottom=Vbottom
+    )
+
+    fem.compute_electric_field()
+
+    fem.plot_results()
+
+    return fem
+
+
+if __name__=="__main__":
+    fem=main()
