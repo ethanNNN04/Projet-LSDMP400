@@ -137,14 +137,14 @@ Les principaux paramètres à ajuster se trouvent dans la **Section 3** du noteb
 ### Tests unitaires
 
 -   Vérification du maillage
--   Vérification des matrices
--   Vérification de la solution
+Objectif : vérifier que la discrétisation est correcte
 
-### Tests fonctionnels
+sim = CoplanarElectrodesFEM()
 
--   Potentiel borné
--   Cohérence physique
--   Visualisation des résultats
+assert sim.n_nodes > 0
+assert sim.n_elements > 0
+assert sim.elements.shape[1] == 4
+
 ___
 
 ## Avertissement sur les performances
