@@ -132,6 +132,20 @@ Les principaux paramètres à ajuster se trouvent dans la **Section 3** du noteb
 | `coplanar_data.npz` | Données brutes (nœuds, éléments, φ, E) au format NumPy |
 
 ---
+## Tests
+
+### Tests unitaires
+
+-   Vérification du maillage
+-   Vérification des matrices
+-   Vérification de la solution
+
+### Tests fonctionnels
+
+-   Potentiel borné
+-   Cohérence physique
+-   Visualisation des résultats
+___
 
 ## Avertissement sur les performances
 
