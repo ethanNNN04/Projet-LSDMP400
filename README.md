@@ -134,17 +134,47 @@ Les principaux paramètres à ajuster se trouvent dans la **Section 3** du noteb
 ---
 ## Tests
 
-### Tests unitaires
+### Test du maillage
+Objectif : vérifier que la discrétisation est correcte.
 
--   Vérification du maillage
-Objectif : vérifier que la discrétisation est correcte
-
+```bash
 sim = CoplanarElectrodesFEM()
 
 assert sim.n_nodes > 0
 assert sim.n_elements > 0
 assert sim.elements.shape[1] == 4
+```
 
+### Test numérique FEM
+Objectif: Détecter les volumes nuls/ matrices mal calculées.
+
+```bash
+elem_nodes = sim.nodes[sim.elements[0]]
+K = sim.local_stiffness_matrix(elem_nodes)
+
+assert K.shape == (4, 4)
+assert np.all(np.isfinite(K))
+```
+
+### Test physique 
+Objectif: Vérifier que le potentiel ne dépasse pas les limites imposées.
+
+```bash
+phi = sim.solve(V_electrode1=100, V_bottom=0)
+
+assert phi.max() <= 100 + 1e-6
+assert phi.min() >= 0 - 1e-6
+```
+
+### Test de convergence
+
+```bash
+sim1 = CoplanarElectrodesFEM(nx=20, ny=10, nz=8)
+sim2 = CoplanarElectrodesFEM(nx=40, ny=20, nz=15)
+
+phi1 = sim1.solve()
+phi2 = sim2.solve()
+```
 ___
 
 ## Avertissement sur les performances
