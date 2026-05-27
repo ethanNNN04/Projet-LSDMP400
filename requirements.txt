@@ -1,5 +1,29 @@
-numpy
+# ============================================================
+# Dépendances — Simulation Électrostatique FEM Coplanaire 3D
+# Notebook : Notebook_SP4_config_3D.ipynb
+# ============================================================
 
-matplotlib
+# --- Calcul scientifique ---
+numpy>=1.21.0          # Tableaux multidimensionnels, algèbre linéaire
+scipy>=1.7.0           # Matrices creuses (scipy.sparse), solveur linéaire (spsolve)
 
-scipy
+# --- Visualisation ---
+matplotlib>=3.4.0      # Figures 2D, contourf, triplot, patches
+
+# --- Environnement interactif ---
+jupyter>=1.0.0         # Meta-paquet Jupyter (notebook + console + qtconsole)
+notebook>=6.4.0        # Interface Jupyter Notebook classique
+ipykernel>=6.0.0       # Noyau IPython pour Jupyter
+
+# --- Optionnel : interface JupyterLab (alternative à notebook) ---
+# jupyterlab>=3.0.0
+
+# --- Notes d'installation ---
+# Créer un environnement virtuel :
+#   python3 -m venv venv_fem && source venv_fem/bin/activate   (Linux/macOS)
+#   python -m venv venv_fem && .\venv_fem\Scripts\Activate.ps1  (Windows)
+#
+# Installer toutes les dépendances :
+#   pip install -r requirements.txt
+#
+# Versions testées : Python 3.8, 3.9, 3.10, 3.11
